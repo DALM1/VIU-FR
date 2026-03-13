@@ -1,4 +1,4 @@
-# ⭐︎ VIU-FR ⭐︎
+# ⭐︎ VIU FR ⭐︎
 
 ```text
 ____   ____.___ ____ ___  _____________________
@@ -16,7 +16,7 @@ ____   ____.___ ____ ___  _____________________
 
 ---
 
-## ✨ Fonctionnalités
+## Fonctionnalités
 
 - **Interface TUI Interactive** : Navigation fluide avec React Ink.
 - **Recherche Hybride** : Résultats précis via **AniList API** (scores, synopsis, genres).
