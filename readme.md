@@ -40,7 +40,7 @@ Assurez-vous d'avoir installé :
 
 1. Clonez le dépôt :
    ```bash
-   git clone <votre-repo>
+   git clone https://github.com/DALM1/VIU-FR
    cd TUI
    ```
 
