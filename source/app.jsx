@@ -110,7 +110,7 @@ const App = () => {
 							value={query}
 							onChange={setQuery}
 							onSubmit={handleSearch}
-							placeholder="Entrez le nom de l'animé (ex: Soul Eater)"
+							placeholder="Entrez le nom de l'animé"
 						/>
 					</Box>
 					<Text color="gray" dimColor>
