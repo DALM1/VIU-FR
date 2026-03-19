@@ -26,35 +26,29 @@ ____   ____.___ ____ ___  _____________________
 
 ---
 
-## Installation
+## 🚀 Installation
 
-### Prérequis
+### Une seule étape (Recommandé)
 
-Assurez-vous d'avoir installé :
+Le script d'installation s'occupe de tout : vérification des outils (Node, Python, mpv, etc.), installation des dépendances et création de l'alias global.
+
+```bash
+chmod +x setup.sh && ./setup.sh
+```
+
+Une fois terminé, redémarrez votre terminal ou lancez `source ~/.zshrc` (ou `.bashrc`). Vous pourrez alors lancer l'app n'importe où :
+
+```bash
+viu-fr
+```
+
+### Prérequis manuels
+Si le script échoue, assurez-vous d'avoir :
 - **Node.js** (v16+)
 - **Python 3.10+**
-- **mpv** (pour le streaming)
-- **yt-dlp** (pour le téléchargement)
-
-### Configuration
-
-1. Clonez le dépôt :
-   ```bash
-   git clone <votre-repo>
-   cd TUI
-   ```
-
-2. Installez les dépendances Node.js :
-   ```bash
-   npm install
-   ```
-
-3. Configurez l'environnement Python :
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install curl_cffi beautifulsoup4 googlesearch-python duckduckgo-search
-   ```
+- **mpv** (`brew install mpv`)
+- **chafa** (`brew install chafa`)
+- **yt-dlp** (`brew install yt-dlp`)
 
 ---
 
