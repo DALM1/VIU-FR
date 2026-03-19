@@ -6,6 +6,8 @@ import re
 from urllib.parse import quote_plus
 from googlesearch import search
 import os
+import subprocess
+import tempfile
 
 class UniversalAnimeScraper:
     def __init__(self):
@@ -66,13 +68,11 @@ class UniversalAnimeScraper:
         """Recherche hybride: AniList pour les infos + VostFree pour les sources VF."""
         anilist_results = self.query_anilist(query)
 
-        # On cherche sur VostFree systématiquement pour chaque résultat AniList
         final_results = []
         for media in anilist_results:
             title_eng = media['title']['english'] or media['title']['romaji']
             title_rom = media['title']['romaji']
 
-            # Recherche de source VF sur VostFree pour cet animé spécifique
             vf_url = self._find_vf_source(title_eng) or self._find_vf_source(title_rom)
 
             final_results.append({
@@ -85,7 +85,7 @@ class UniversalAnimeScraper:
                 "score": media['averageScore'],
                 "status": media['status'],
                 "total_episodes": media['episodes'],
-                "url": vf_url or f"SEARCH_ENG:{title_eng}" # Fallback anglais
+                "url": vf_url or f"SEARCH_ENG:{title_eng}"
             })
 
         return final_results
@@ -100,10 +100,8 @@ class UniversalAnimeScraper:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 for a in soup.find_all('a', href=True):
                     href = a['href']
-                    # On vérifie si c'est un lien d'animé valide et si le titre correspond un peu
                     if (('-vf' in href.lower() or '-vostfr' in href.lower()) and '.html' in href):
                         link_text = a.text.strip().lower()
-                        # Si le titre de l'animé est dans le texte du lien ou l'URL
                         if title.lower() in link_text or title.lower().replace(' ', '-') in href.lower():
                             return href if href.startswith('http') else "https://vostfree.ws" + href
         except: pass
@@ -124,7 +122,6 @@ class UniversalAnimeScraper:
         soup = BeautifulSoup(response.text, 'html.parser')
         episodes = []
 
-        # On cherche dans le sélecteur VostFree
         select = soup.find('select', class_='new_player_selector')
         if select:
             for opt in select.find_all('option'):
@@ -133,7 +130,6 @@ class UniversalAnimeScraper:
                     "url": anime_url + "#" + opt['value']
                 })
 
-        # Fallback si pas de sélecteur (pour les animés avec un seul épisode ou format différent)
         if not episodes:
             for btn in soup.find_all(['div', 'a', 'span'], class_=re.compile(r'button|episode|play')):
                 text = btn.text.strip()
@@ -166,11 +162,7 @@ class UniversalAnimeScraper:
         resolved_links = []
         if response and response.status_code == 200:
             text = response.text
-
-            # Chercher les lecteurs dans le HTML
             all_links = re.findall(r'https?://(?:www\.)?(?:yourupload\.com|sibnet\.ru|ok\.ru|mystream\.to|upstream\.to|embed\.|player\.|stream\.)[^\s\'\"<>]+', text)
-
-            # Spécifique VostFree Sibnet
             if player_id:
                 player_match = re.search(fr'id="{player_id}"[^>]*>.*?id="player_(\d+)"', text, re.DOTALL)
                 if player_match:
@@ -200,12 +192,35 @@ class UniversalAnimeScraper:
 
     def download_video(self, url, output_path):
         """Utilise yt-dlp pour télécharger la vidéo."""
-        import subprocess
         try:
             subprocess.run(['yt-dlp', '-o', output_path, url], check=True)
             return True
         except:
             return False
+
+    def get_poster_art(self, url, width=40, height=20):
+        """Télécharge le poster et le convertit en ASCII via chafa."""
+        try:
+            response = self._get(url)
+            if response and response.status_code == 200:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                    tmp.write(response.content)
+                    tmp_path = tmp.name
+
+                try:
+                    # On utilise les blocs standards les plus compatibles pour éviter les "?"
+                    # chafa --symbols block (compatible partout, même Apple Terminal)
+                    # --color-space 256 pour la compatibilité maximale
+                    cmd = ['chafa', f'--size={width}x{height}', '--symbols=block', '--color-space=256', '--dither=none', tmp_path]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    os.unlink(tmp_path)
+                    return result.stdout
+                except Exception as e:
+                    if os.path.exists(tmp_path): os.unlink(tmp_path)
+                    return f"Chafa error: {e}"
+        except Exception as e:
+            return f"Download error: {e}"
+        return "No image found"
 
 if __name__ == "__main__":
     scraper = UniversalAnimeScraper()
@@ -219,3 +234,8 @@ if __name__ == "__main__":
     elif action == "download":
         success = scraper.download_video(sys.argv[2], sys.argv[3])
         print(json.dumps({"success": success}))
+    elif action == "poster":
+        # python scraper.py poster <url> [width] [height]
+        w = int(sys.argv[3]) if len(sys.argv) > 3 else 40
+        h = int(sys.argv[4]) if len(sys.argv) > 4 else 20
+        print(scraper.get_poster_art(sys.argv[2], w, h))

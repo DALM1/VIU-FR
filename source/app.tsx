@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput, useApp } from 'ink';
 import TextInput from 'ink-text-input';
 import SelectInput from 'ink-select-input';
@@ -27,6 +27,7 @@ const App = () => {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [downloading, setDownloading] = useState(false);
+    const [posterArt, setPosterArt] = useState<string | null>(null);
 
     const runScraper = async (args: string[]) => {
         setLoading(true);
@@ -34,9 +35,11 @@ const App = () => {
         try {
             const pythonPath = path.join(process.cwd(), 'venv', 'bin', 'python3');
             const { stdout } = await execa(pythonPath, ['scraper.py', ...args]);
-            const data = JSON.parse(stdout);
-            if (data.error) throw new Error(data.error);
-            return data;
+            try {
+                return JSON.parse(stdout);
+            } catch {
+                return stdout; // Pour les sorties non-JSON comme l'ASCII art
+            }
         } catch (err: any) {
             setError(err.message);
             return null;
@@ -45,10 +48,19 @@ const App = () => {
         }
     };
 
+    const fetchPosterArt = async (url: string) => {
+        if (!url) {
+            setPosterArt(null);
+            return;
+        }
+        const art = await runScraper(['poster', url, '30', '15']);
+        setPosterArt(art);
+    };
+
     const handleSearch = async () => {
         if (!query) return;
         const data = await runScraper(['search', query]);
-        if (data) {
+        if (data && Array.isArray(data)) {
             setResults(data);
             setView('results');
         }
@@ -62,6 +74,7 @@ const App = () => {
             setAnimeInfo(data);
             setEpisodes(data.episodes.map((ep: any) => ({ label: ep.title, value: ep.url })));
             setView('info');
+            if (anime.poster) fetchPosterArt(anime.poster);
         }
     };
 
@@ -71,7 +84,6 @@ const App = () => {
             setStreams(data.map((url: string) => ({ label: url.split('/').pop()?.substring(0, 30) || url, value: url })));
             setView('streams');
 
-            // Lancement automatique si un seul lien est trouvé (comme avant)
             if (data.length === 1) {
                 try {
                     await execa('mpv', ['--fs', data[0]], { stdio: 'inherit' });
@@ -85,7 +97,6 @@ const App = () => {
     };
 
     const handleSelectStream = async (item: any) => {
-        // Option simple: regarder par défaut. On pourrait ajouter un menu "Regarder / Télécharger"
         try {
             await execa('mpv', ['--fs', item.value], { stdio: 'inherit' });
         } catch (err) {
@@ -116,7 +127,6 @@ const App = () => {
         if (input === 's' && view !== 'search') setView('search');
         if (input === 'q') exit();
         if (input === 'd' && view === 'streams') {
-            // Télécharger le premier lien disponible pour simplifier
             if (streams.length > 0) handleDownload(streams[0]);
         }
     });
@@ -142,7 +152,7 @@ const App = () => {
     );
 
     return (
-        <Box flexDirection="column" padding={1} width={120}>
+        <Box flexDirection="column" padding={1} width={130}>
             {renderHeader()}
 
             {error && (
@@ -151,7 +161,7 @@ const App = () => {
                 </Box>
             )}
 
-            <Box height={25}>
+            <Box height={35}>
                 {view === 'search' && (
                     <Box flexDirection="column" borderStyle="round" paddingX={2} paddingY={1} width="100%" alignItems="center" justifyContent="center">
                         <Text color="cyan">{ASCII_ART}</Text>
@@ -179,21 +189,22 @@ const App = () => {
                                 onHighlight={(item) => {
                                     const anime = results.find(r => r.id.toString() === item.value);
                                     setSelectedAnime(anime);
+                                    if (anime.poster) fetchPosterArt(anime.poster);
                                 }}
                             />
                         </Box>
                         <Box flexDirection="column" width="60%" borderStyle="round" paddingX={2} borderColor="gray">
                             {selectedAnime ? (
-                                <Box flexDirection="column">
+                                <Box flexDirection="column" width="100%">
+                                    <Box alignSelf="center" marginBottom={1} height={16} overflow="hidden">
+                                        {posterArt ? <Text wrap="truncate">{posterArt}</Text> : <Text dimColor>[Chargement...]</Text>}
+                                    </Box>
                                     <Text color="yellow" bold>{selectedAnime.title}</Text>
                                     <Text dimColor italic>{selectedAnime.romaji}</Text>
                                     <Box marginTop={1} borderStyle="single" borderColor="dim" paddingX={1}>
                                         <Text dimColor italic wrap="wrap">
                                             {selectedAnime.synopsis?.replace(/<[^>]*>?/gm, '') || "Pas de synopsis disponible."}
                                         </Text>
-                                    </Box>
-                                    <Box marginTop={1}>
-                                        <Text color="yellow">Score: {selectedAnime.score}% | Status: {selectedAnime.status}</Text>
                                     </Box>
                                 </Box>
                             ) : (
@@ -212,6 +223,9 @@ const App = () => {
                             <SelectInput items={episodes} onSelect={handleSelectEpisode} />
                         </Box>
                         <Box flexDirection="column" width="70%" borderStyle="round" paddingX={2} borderColor="gray">
+                            <Box alignSelf="center" marginBottom={1} height={16} overflow="hidden">
+                                {posterArt ? <Text wrap="truncate">{posterArt}</Text> : <Text dimColor>[Image]</Text>}
+                            </Box>
                             <Text color="cyan" bold>{selectedAnime.title}</Text>
                             <Box flexDirection="row" marginTop={1}>
                                 {selectedAnime.genres.map((g: string) => (

@@ -60,7 +60,23 @@ Assurez-vous d'avoir installé :
 
 ## Utilisation
 
-Lancez l'application avec :
+### Installation de la commande globale
+
+Pour pouvoir lancer **viu-fr** n'importe où dans votre terminal, exécutez le script d'installation automatique :
+
+```bash
+chmod +x setup.sh && ./setup.sh
+```
+
+Une fois l'alias ajouté, redémarrez votre terminal ou lancez `source ~/.zshrc` (ou `.bashrc`). Vous pourrez alors simplement taper :
+
+```bash
+viu-fr
+```
+
+### Commandes classiques
+
+Si vous préférez lancer manuellement depuis le dossier du projet :
 ```bash
 npm start
 ```
