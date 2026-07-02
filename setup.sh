@@ -39,7 +39,11 @@ fi
 
 # 2. Installation des dépendances Node.js
 echo -e "\n${BLUE}[2/5] Installation des dépendances Node.js...${NC}"
-npm install
+if [ -f "package-lock.json" ]; then
+    npm ci
+else
+    npm install
+fi
 npm run build
 
 # 3. Configuration de l'environnement Python
