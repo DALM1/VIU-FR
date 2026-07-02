@@ -1,13 +1,18 @@
 from curl_cffi import requests
 from bs4 import BeautifulSoup
+import concurrent.futures
 import sys
 import json
 import re
-from urllib.parse import urljoin, urlparse, parse_qs, unquote
+from urllib.parse import urljoin, urlparse, parse_qs, quote, unquote
 from googlesearch import search
 import os
+import shutil
 import subprocess
 import tempfile
+import urllib.request
+import time
+import websocket
 
 
 class UniversalAnimeScraper:
@@ -17,6 +22,42 @@ class UniversalAnimeScraper:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
         }
         self._franime_catalog = None
+
+    # #region debug-point A:franime-debug-helper
+    def _debug_event(self, hypothesis_id, location, msg, data=None, run_id="pre-fix"):
+        payload = {
+            "sessionId": "franime-mpv-episode-list",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+        }
+        try:
+            env_path = ".dbg/franime-mpv-episode-list.env"
+            if not os.path.exists(env_path):
+                env_path = ".dbg/franime-sibnet-terminal.env"
+            url = "http://127.0.0.1:7778/event"
+            session = "franime-mpv-episode-list"
+            try:
+                with open(env_path, "r", encoding="utf-8") as file:
+                    content = file.read().splitlines()
+                url = next((line.split("=", 1)[1] for line in content if line.startswith("DEBUG_SERVER_URL=")), url)
+                session = next((line.split("=", 1)[1] for line in content if line.startswith("DEBUG_SESSION_ID=")), session)
+                payload["sessionId"] = session
+            except Exception:
+                pass
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=2,
+            ).read()
+        except Exception:
+            pass
+    # #endregion
 
     def _get(self, url, referer=None, impersonate="chrome110", headers=None, session=None):
         request_headers = self.headers.copy()
@@ -51,6 +92,190 @@ class UniversalAnimeScraper:
         except Exception as e:
             print(f"Error posting {url}: {e}", file=sys.stderr)
             return None
+
+    def _read_json_url(self, url, method="GET", timeout=5):
+        try:
+            request = urllib.request.Request(url, method=method)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    def _ensure_chrome_devtools(self):
+        if self._read_json_url("http://127.0.0.1:9222/json/version", timeout=2):
+            return True
+
+        profile_dir = "/tmp/viu-fr-devtools-profile"
+        chrome_binary = None
+        for candidate in (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            shutil.which("google-chrome"),
+            shutil.which("chromium"),
+            shutil.which("chrome"),
+        ):
+            if candidate and os.path.exists(candidate):
+                chrome_binary = candidate
+                break
+        if not chrome_binary:
+            return False
+
+        try:
+            subprocess.run(
+                ["pkill", "-f", profile_dir],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            time.sleep(1)
+        except Exception:
+            pass
+
+        try:
+            subprocess.Popen(
+                [
+                    chrome_binary,
+                    f"--user-data-dir={profile_dir}",
+                    "--remote-debugging-port=9222",
+                    "--remote-allow-origins=*",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--no-startup-window",
+                    "--disable-search-engine-choice-screen",
+                    "--disable-features=SearchEngineChoiceScreen",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            return False
+
+        for _ in range(12):
+            time.sleep(1)
+            if self._read_json_url("http://127.0.0.1:9222/json/version", timeout=2):
+                return True
+
+        return False
+
+    def _close_devtools_target(self, target_id):
+        if not target_id:
+            return
+
+        try:
+            close_url = f"http://127.0.0.1:9222/json/close/{target_id}"
+            self._read_json_url(close_url, method="GET", timeout=5)
+        except Exception:
+            pass
+
+    def _cdp_call(self, ws, message_id, method, params=None):
+        try:
+            ws.send(json.dumps({"id": message_id, "method": method, "params": params or {}}))
+            while True:
+                payload = json.loads(ws.recv())
+                if payload.get("id") == message_id:
+                    return payload
+        except Exception:
+            return None
+
+    def _cdp_runtime_evaluate(self, ws, message_id, expression):
+        response = self._cdp_call(
+            ws,
+            message_id,
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+        if not response:
+            return None
+        return ((response.get("result") or {}).get("result") or {}).get("value")
+
+    def _extract_watch2_with_visible_chrome(self, watch2_url):
+        if not watch2_url:
+            return None
+
+        if not self._ensure_chrome_devtools():
+            # #region debug-point F:franime-chrome-devtools-unavailable
+            self._debug_event(
+                "F",
+                "scraper.py:_extract_watch2_with_visible_chrome:devtools",
+                "Chrome DevTools is unavailable for watch2 extraction",
+                {"watch2_url": watch2_url},
+                run_id="post-fix",
+            )
+            # #endregion
+            return None
+
+        created_target_id = None
+        ws = None
+        try:
+            encoded_watch2_url = quote(watch2_url, safe=":/?=%")
+            open_url = f"http://127.0.0.1:9222/json/new?{encoded_watch2_url}"
+            created_target = self._read_json_url(open_url, method="PUT", timeout=10)
+            if not isinstance(created_target, dict):
+                return None
+
+            created_target_id = created_target.get("id")
+            web_socket_url = created_target.get("webSocketDebuggerUrl")
+            if not web_socket_url:
+                return None
+
+            ws = websocket.create_connection(web_socket_url, timeout=10)
+            self._cdp_call(ws, 1, "Page.enable")
+            self._cdp_call(ws, 2, "Runtime.enable")
+
+            for attempt in range(12):
+                time.sleep(1)
+                current_page_url = self._cdp_runtime_evaluate(ws, 100 + attempt * 10, "location.href") or watch2_url
+                iframe_values = self._cdp_runtime_evaluate(
+                    ws,
+                    101 + attempt * 10,
+                    "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map((node) => node.getAttribute('src') || node.src || ''))",
+                )
+
+                iframe_candidates = []
+                try:
+                    iframe_urls = json.loads(iframe_values) if iframe_values else []
+                except Exception:
+                    iframe_urls = []
+
+                for iframe_url in iframe_urls:
+                    if not iframe_url:
+                        continue
+                    normalized_iframe_url = urljoin(current_page_url, iframe_url)
+                    if any(marker in normalized_iframe_url for marker in ("sibnet", "shell.php", "videoid=")):
+                        iframe_candidates.append(normalized_iframe_url)
+
+                # #region debug-point F:franime-chrome-devtools-poll
+                self._debug_event(
+                    "F",
+                    "scraper.py:_extract_watch2_with_visible_chrome:poll",
+                    "Polled Chrome DevTools for watch2 iframe URLs",
+                    {
+                        "watch2_url": watch2_url,
+                        "attempt": attempt,
+                        "current_page_url": current_page_url,
+                        "iframe_candidates": iframe_candidates[:10],
+                    },
+                    run_id="post-fix",
+                )
+                # #endregion
+
+                if iframe_candidates:
+                    return iframe_candidates[0]
+        finally:
+            try:
+                if ws is not None:
+                    ws.close()
+            except Exception:
+                pass
+            if created_target_id:
+                self._close_devtools_target(created_target_id)
+
+        return None
 
     def _normalize_title(self, title):
         if not title:
@@ -469,14 +694,17 @@ class UniversalAnimeScraper:
     def _search_atitop(self, query, anilist_results=None):
         results = []
         seen_urls = set()
+        query_norm = self._normalize_title(query)
+        exact_match_found = False
 
-        for offset in range(0, 1200, 20):
+        for offset in range(0, 5000, 20):
             films = self._get_atitop_films_page(offset=offset, limit=20)
             if not films:
                 break
 
             for film in films:
                 title = film.get("title") or ""
+                clean_title = re.sub(r"\s*\(\d{4}\)$", "", title).strip()
                 score = self._score_candidate_titles([title], query)
                 if score < 70:
                     continue
@@ -487,7 +715,7 @@ class UniversalAnimeScraper:
                 seen_urls.add(url)
 
                 metadata = self._extract_atitop_metadata(url) or {}
-                display_title = re.sub(r"\s*\(\d{4}\)$", "", title).strip() or metadata.get("title") or "Film"
+                display_title = clean_title or metadata.get("title") or "Film"
                 category = film.get("cat") or "Film"
                 poster = metadata.get("poster") or film.get("poster")
 
@@ -516,43 +744,128 @@ class UniversalAnimeScraper:
                     media = self._match_anilist_media(anilist_results, [display_title])
                     results[-1] = self._enrich_result_with_anilist(results[-1], media)
 
+                if self._normalize_title(display_title) == query_norm:
+                    exact_match_found = True
+
             if len(results) >= 12:
+                break
+            if exact_match_found:
                 break
 
         results.sort(key=lambda item: item.get("_relevance", 0), reverse=True)
         return results
 
-    def search_anime(self, query):
-        """Recherche agrégée sur AniList, VostFree, FRAnime et Atitop."""
-        anilist_results = self.query_anilist(query)
-        final_results = []
-
+    def _build_anilist_batch(self, query, anilist_results):
+        batch = []
         for media in anilist_results:
             result = self._build_anilist_result(media)
             result["_relevance"] = self._score_candidate_titles(self._unique_titles(media), query)
-            final_results.append(result)
+            batch.append(result)
+        return batch
 
-        existing_urls = {result["url"] for result in final_results}
+    def _enrich_search_batch(self, results, anilist_results):
+        if not anilist_results:
+            return [result.copy() for result in results]
 
-        for vostfree_result in self._search_vostfree(query, anilist_results):
-            if vostfree_result["url"] not in existing_urls:
-                final_results.append(vostfree_result)
-                existing_urls.add(vostfree_result["url"])
+        enriched_results = []
+        for result in results:
+            enriched = result.copy()
+            if enriched.get("source_label") != "anglais":
+                titles = [title for title in (enriched.get("title"), enriched.get("romaji")) if title]
+                media = self._match_anilist_media(anilist_results, titles)
+                enriched = self._enrich_result_with_anilist(enriched, media)
+            enriched_results.append(enriched)
 
-        for franime_result in self._search_franime(query, anilist_results):
-            if franime_result["url"] not in existing_urls:
-                final_results.append(franime_result)
-                existing_urls.add(franime_result["url"])
+        return enriched_results
 
-        for atitop_result in self._search_atitop(query, anilist_results):
-            if atitop_result["url"] not in existing_urls:
-                final_results.append(atitop_result)
-                existing_urls.add(atitop_result["url"])
+    def _merge_search_batches(self, current_results, incoming_results):
+        merged_by_url = {result["url"]: result.copy() for result in current_results}
+        ordered_urls = [result["url"] for result in current_results]
 
-        final_results.sort(key=lambda item: item.get("_relevance", 0), reverse=True)
+        for result in incoming_results:
+            url = result.get("url")
+            if not url:
+                continue
+
+            incoming = result.copy()
+            existing = merged_by_url.get(url)
+            if not existing:
+                merged_by_url[url] = incoming
+                ordered_urls.append(url)
+                continue
+
+            merged = existing.copy()
+            for key, value in incoming.items():
+                if key == "_relevance":
+                    merged[key] = max(existing.get(key, 0), value or 0)
+                elif value not in (None, "", [], {}):
+                    merged[key] = value
+                elif key not in merged:
+                    merged[key] = value
+            merged_by_url[url] = merged
+
+        merged_results = [merged_by_url[url] for url in ordered_urls if url in merged_by_url]
+        merged_results.sort(key=lambda item: item.get("_relevance", 0), reverse=True)
+        return merged_results[:30]
+
+    def iter_search_anime(self, query):
+        """Recherche agrégée incrémentale pour pousser les résultats par source."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(self.query_anilist, query): "anilist",
+                executor.submit(self._search_vostfree, query, None): "vostfree",
+                executor.submit(self._search_franime, query, None): "franime",
+                executor.submit(self._search_atitop, query, None): "atitop",
+            }
+            completed_batches = {}
+            anilist_results = None
+
+            for future in concurrent.futures.as_completed(futures):
+                source = futures[future]
+                try:
+                    raw_results = future.result() or []
+                except Exception as e:
+                    print(f"Search source error ({source}): {e}", file=sys.stderr)
+                    raw_results = []
+
+                if source == "anilist":
+                    anilist_results = raw_results
+                    batch = self._build_anilist_batch(query, anilist_results)
+                    completed_batches[source] = batch
+                    yield {"type": "results", "source": source, "results": batch}
+
+                    for completed_source, completed_results in completed_batches.items():
+                        if completed_source == "anilist":
+                            continue
+
+                        enriched_batch = self._enrich_search_batch(completed_results, anilist_results)
+                        yield {
+                            "type": "results",
+                            "source": completed_source,
+                            "results": enriched_batch,
+                            "phase": "enriched",
+                        }
+                    continue
+
+                completed_batches[source] = raw_results
+                yield {
+                    "type": "results",
+                    "source": source,
+                    "results": self._enrich_search_batch(raw_results, anilist_results),
+                }
+
+        yield {"type": "done"}
+
+    def search_anime(self, query):
+        """Recherche agrégée sur AniList, VostFree, FRAnime et Atitop."""
+        final_results = []
+        for event in self.iter_search_anime(query):
+            if event.get("type") != "results":
+                continue
+            final_results = self._merge_search_batches(final_results, event.get("results", []))
+
         for result in final_results:
             result.pop("_relevance", None)
-
         return final_results[:30]
 
     def _find_franime_entry_from_url(self, anime_url):
@@ -670,7 +983,25 @@ class UniversalAnimeScraper:
             season_index = int(season_index)
             episode_index = int(episode_index)
         except ValueError:
+            # #region debug-point A:franime-token-parse-failed
+            self._debug_event("A", "scraper.py:_get_franime_stream_links:parse", "Failed to parse FRANIME token", {"token": token})
+            # #endregion
             return []
+
+        # #region debug-point A:franime-token-parsed
+        self._debug_event(
+            "A",
+            "scraper.py:_get_franime_stream_links:token",
+            "Parsed FRANIME token",
+            {
+                "token": token,
+                "anime_id": anime_id,
+                "season_index": season_index,
+                "episode_index": episode_index,
+                "lang": lang,
+            },
+        )
+        # #endregion
 
         entry = None
         for candidate in self._get_franime_catalog():
@@ -678,6 +1009,9 @@ class UniversalAnimeScraper:
                 entry = candidate
                 break
         if not entry:
+            # #region debug-point A:franime-entry-missing
+            self._debug_event("A", "scraper.py:_get_franime_stream_links:entry", "FRANIME entry not found in catalog", {"anime_id": anime_id})
+            # #endregion
             return []
 
         seasons = entry.get("saisons") or []
@@ -688,6 +1022,21 @@ class UniversalAnimeScraper:
             return []
 
         lecteurs = (((episodes[episode_index].get("lang") or {}).get(lang) or {}).get("lecteurs")) or []
+        # #region debug-point B:franime-lecteurs
+        self._debug_event(
+            "B",
+            "scraper.py:_get_franime_stream_links:lecteurs",
+            "Collected FRANIME lecteurs",
+            {
+                "anime_id": anime_id,
+                "season_index": season_index,
+                "episode_index": episode_index,
+                "lang": lang,
+                "lecteur_count": len(lecteurs),
+                "lecteurs": lecteurs[:10],
+            },
+        )
+        # #endregion
         if not lecteurs:
             return []
 
@@ -697,7 +1046,24 @@ class UniversalAnimeScraper:
         local_session = requests.Session()
         landing = self._get(page_url, session=local_session)
         if not landing or landing.status_code != 200:
+            # #region debug-point D:franime-landing-failed
+            self._debug_event(
+                "D",
+                "scraper.py:_get_franime_stream_links:landing",
+                "Failed to fetch FRANIME landing page",
+                {"page_url": page_url, "status_code": landing.status_code if landing else None},
+            )
+            # #endregion
             return []
+
+        # #region debug-point D:franime-landing-ok
+        self._debug_event(
+            "D",
+            "scraper.py:_get_franime_stream_links:landing",
+            "Fetched FRANIME landing page",
+            {"page_url": page_url, "status_code": landing.status_code, "final_url": landing.url},
+        )
+        # #endregion
 
         links = []
         for lecteur_index, lecteur_name in enumerate(lecteurs):
@@ -710,13 +1076,135 @@ class UniversalAnimeScraper:
                 headers={"Origin": "https://franime.fr"},
                 referer=page_url,
             )
+            # #region debug-point B:franime-api-response
+            self._debug_event(
+                "B",
+                "scraper.py:_get_franime_stream_links:api",
+                "Fetched FRANIME lecteur API response",
+                {
+                    "api_url": f"{api_url_template}/{lecteur_index}",
+                    "lecteur_index": lecteur_index,
+                    "lecteur_name": lecteur_name,
+                    "status_code": response.status_code if response else None,
+                    "body_preview": (response.text[:160] if response and response.text else ""),
+                },
+            )
+            # #endregion
             if not response or response.status_code != 200:
                 continue
 
             url = response.text.strip()
-            if url.startswith("http") and url not in links:
-                links.append(url)
+            if "franime.fr/watch2/" in url:
+                # #region debug-point E:franime-watch2-url
+                self._debug_event(
+                    "E",
+                    "scraper.py:_get_franime_stream_links:watch2-url",
+                    "Received FRANIME watch2 URL from API",
+                    {"watch2_url": url, "page_url": page_url, "lecteur_name": lecteur_name},
+                )
+                # #endregion
+                # First try to get watch2 content and extract iframe/stream using existing session
+                watch2_resp = self._get(url, session=local_session, referer=page_url, impersonate='chrome119')
+                # #region debug-point E:franime-watch2-fetch
+                self._debug_event(
+                    "E",
+                    "scraper.py:_get_franime_stream_links:watch2-fetch",
+                    "Fetched FRANIME watch2 response",
+                    {
+                        "watch2_url": url,
+                        "status_code": watch2_resp.status_code if watch2_resp else None,
+                        "final_url": watch2_resp.url if watch2_resp else None,
+                        "body_preview": (watch2_resp.text[:400] if watch2_resp and watch2_resp.text else ""),
+                        "contains_sibnet_literal": bool(watch2_resp and "sibnet" in watch2_resp.text.lower()),
+                        "contains_iframe_literal": bool(watch2_resp and "<iframe" in watch2_resp.text.lower()),
+                    },
+                )
+                # #endregion
+                if watch2_resp and watch2_resp.status_code == 200:
+                    watch2_soup = BeautifulSoup(watch2_resp.text, 'html.parser')
+                    iframe_urls = [urljoin(url, iframe['src']) for iframe in watch2_soup.find_all('iframe', src=True)]
+                    # #region debug-point E:franime-watch2-iframes
+                    self._debug_event(
+                        "E",
+                        "scraper.py:_get_franime_stream_links:watch2-iframes",
+                        "Collected iframe URLs from watch2 HTML",
+                        {
+                            "watch2_url": url,
+                            "iframe_count": len(iframe_urls),
+                            "iframe_urls": iframe_urls[:10],
+                        },
+                    )
+                    # #endregion
+                    # Try to find any iframes
+                    for iframe_url in iframe_urls:
+                        resolved = self.resolve_stream(iframe_url)
+                        if resolved and resolved not in links:
+                            links.append(resolved)
+                    # Try to find any script tags with m3u8 or direct video URLs
+                    script_url_matches = []
+                    for script in watch2_soup.find_all('script'):
+                        script_content = script.string or ''
+                        # Find any URLs starting with http(s)
+                        url_matches = re.findall(r'https?://[^\s\'"]+', script_content)
+                        if url_matches:
+                            script_url_matches.extend(url_matches)
+                        for match in url_matches:
+                            if ('.m3u8' in match or '.mp4' in match or '.webm' in match) and match not in links:
+                                links.append(match)
+                    # #region debug-point E:franime-watch2-script-urls
+                    self._debug_event(
+                        "E",
+                        "scraper.py:_get_franime_stream_links:watch2-script-urls",
+                        "Collected URLs from watch2 scripts",
+                        {
+                            "watch2_url": url,
+                            "script_url_count": len(script_url_matches),
+                            "script_url_matches": script_url_matches[:20],
+                        },
+                    )
+                    # #endregion
 
+                # If watch2 stayed opaque, expose only the browser fallback token.
+                if not links:
+                    chrome_link = self._extract_watch2_with_visible_chrome(url)
+                    if chrome_link and chrome_link not in links:
+                        # #region debug-point F:franime-chrome-devtools-success
+                        self._debug_event(
+                            "F",
+                            "scraper.py:_get_franime_stream_links:chrome-devtools-success",
+                            "Recovered a terminal-friendly link from visible Chrome",
+                            {"watch2_url": url, "chrome_link": chrome_link},
+                            run_id="post-fix",
+                        )
+                        # #endregion
+                        links.append(chrome_link)
+
+                if not links:
+                    browser_fallback = f"FRANIME_BROWSER:{page_url}"
+                    # #region debug-point E:franime-watch2-fallback
+                    self._debug_event(
+                        "E",
+                        "scraper.py:_get_franime_stream_links:watch2-fallback",
+                        "Falling back to browser target after opaque watch2 response",
+                        {"watch2_url": url, "browser_fallback": browser_fallback, "page_url": page_url},
+                    )
+                    # #endregion
+                    if browser_fallback not in links:
+                        links.append(browser_fallback)
+            else:
+                if url.startswith("http") and url not in links:
+                    links.append(url)
+                elif url.startswith("FRANIME_BROWSER:") and url not in links:
+                    links.append(url)
+
+        # #region debug-point C:franime-links-returned
+        self._debug_event(
+            "C",
+            "scraper.py:_get_franime_stream_links:result",
+            "Returning FRANIME stream links",
+            {"token": token, "link_count": len(links), "links": links[:10]},
+        )
+        # #endregion
         return links
 
     def _get_atitop_stream_links(self, token):
@@ -732,7 +1220,7 @@ class UniversalAnimeScraper:
 
         resolved = []
         for url in iframe_urls:
-            stream = self.resolve_stream(url)
+            stream = url if "sharecloudy.com" in url else self.resolve_stream(url)
             if stream and stream not in resolved:
                 resolved.append(stream)
         return resolved
@@ -753,7 +1241,16 @@ class UniversalAnimeScraper:
             return links
 
         if episode_url.startswith("FRANIME:"):
-            return self._get_franime_stream_links(episode_url)
+            links = self._get_franime_stream_links(episode_url)
+            # #region debug-point C:franime-get-stream-links
+            self._debug_event(
+                "C",
+                "scraper.py:get_stream_links:franime",
+                "Resolved FRANIME links in get_stream_links",
+                {"episode_url": episode_url, "link_count": len(links), "links": links[:10]},
+            )
+            # #endregion
+            return links
 
         if episode_url.startswith("ATITOP:"):
             return self._get_atitop_stream_links(episode_url)
@@ -809,7 +1306,8 @@ class UniversalAnimeScraper:
                 if not match:
                     match = re.search(r'https?://[^\s\'"<>]+m3u8[^\s\'"<>]*', res.text)
                 if match:
-                    return match.group(1) if hasattr(match, "group") else match[0]
+                    resolved_url = match.group(1) if hasattr(match, "group") else match[0]
+                    return resolved_url
 
         return url
 
@@ -849,6 +1347,9 @@ if __name__ == "__main__":
     action = sys.argv[1]
     if action == "search":
         print(json.dumps(scraper.search_anime(sys.argv[2]), indent=2))
+    elif action == "search-stream":
+        for event in scraper.iter_search_anime(sys.argv[2]):
+            print(json.dumps(event), flush=True)
     elif action == "info":
         print(json.dumps(scraper.get_anime_info(sys.argv[2]), indent=2))
     elif action == "stream":
