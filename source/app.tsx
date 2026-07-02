@@ -41,6 +41,11 @@ const getStreamDisplayLabel = (value: string, index: number, isTiny: boolean) =>
 
 const buildMpvArgs = (url: string) => ['--fs', url];
 
+const openExternalUrl = async (url: string) => {
+	const command = process.platform === 'darwin' ? 'open' : 'xdg-open';
+	await execa(command, [url], {stdio: 'ignore'});
+};
+
 // #region debug-point A:franime-ui-debug-helper
 const debugEvent = async (
 	hypothesisId: string,
@@ -418,7 +423,7 @@ const App = () => {
 			});
 
 			if (isBrowserStreamTarget(streamUrl)) {
-				await execa('open', [streamUrl.replace('FRANIME_BROWSER:', '')]);
+				await openExternalUrl(streamUrl.replace('FRANIME_BROWSER:', ''));
 				return;
 			}
 
@@ -598,7 +603,7 @@ const App = () => {
 			});
 			// #endregion
 			if (isBrowserStreamTarget(item.value)) {
-				await execa('open', [item.value.replace('FRANIME_BROWSER:', '')]);
+				await openExternalUrl(item.value.replace('FRANIME_BROWSER:', ''));
 			} else {
 				const episodeIndex = activeEpisodeIndex ?? selectedEpisodeIndex;
 				await playEpisodeSequence(episodeIndex, [item.value], 'source/app.tsx:handleSelectStream');

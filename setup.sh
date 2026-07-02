@@ -54,7 +54,7 @@ fi
 source venv/bin/activate
 echo -e "Installation des packages Python..."
 pip install --upgrade pip
-pip install curl_cffi beautifulsoup4 googlesearch-python duckduckgo-search anilist-python
+pip install curl_cffi beautifulsoup4 googlesearch-python duckduckgo-search anilist-python websocket-client
 echo -e "${GREEN}✔ Dépendances Python installées.${NC}"
 
 # 4. Préparation du script de lancement
